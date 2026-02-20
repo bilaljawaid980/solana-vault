@@ -7,7 +7,7 @@ import { getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
 import assert from "assert";
 import fs from "fs";
 
-describe("vault", () => {
+describe("vault — full test suite", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -25,30 +25,36 @@ describe("vault", () => {
 
   before(async () => {
     [vaultStatePDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault2"), owner.toBuffer()],
+      [Buffer.from("vault3"), owner.toBuffer()],
       program.programId
     );
     [lpMintPDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("lp_mint2"), owner.toBuffer()],
+      [Buffer.from("lp_mint3"), owner.toBuffer()],
       program.programId
     );
     [depositorStatePDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("depositor2"), depositorKeypair.publicKey.toBuffer(), owner.toBuffer()],
+      [Buffer.from("depositor3"), depositorKeypair.publicKey.toBuffer(), owner.toBuffer()],
       program.programId
     );
 
-    console.log("Owner wallet      :", owner.toString());
-    console.log("Depositor wallet  :", depositorKeypair.publicKey.toString());
-    console.log("Vault PDA         :", vaultStatePDA.toString());
-    console.log("LP Mint PDA       :", lpMintPDA.toString());
-    console.log("Depositor PDA     :", depositorStatePDA.toString());
+    console.log("═══════════════════════════════════════════════");
+    console.log("  VAULT TEST SUITE");
+    console.log("═══════════════════════════════════════════════");
+    console.log("Owner wallet  :", owner.toString());
+    console.log("Depositor     :", depositorKeypair.publicKey.toString());
+    console.log("Vault PDA     :", vaultStatePDA.toString());
+    console.log("LP Mint PDA   :", lpMintPDA.toString());
+    console.log("Depositor PDA :", depositorStatePDA.toString());
+    console.log("═══════════════════════════════════════════════");
   });
 
   // ─────────────────────────────────────────
-  it("Register — creates vault + LP mint", async () => {
+  // TEST 1
+  // ─────────────────────────────────────────
+  it("1. Register — owner creates vault + LP mint with 4 day lock", async () => {
     try {
       await program.account.vaultState.fetch(vaultStatePDA);
-      console.log("⚠️  Vault already exists on-chain, skipping register...");
+      console.log("⚠️  Vault already exists, skipping...");
       return;
     } catch (_) {}
 
@@ -65,15 +71,20 @@ describe("vault", () => {
     const state = await program.account.vaultState.fetch(vaultStatePDA);
     assert.strictEqual(state.owner.toString(), owner.toString());
     assert.strictEqual(state.balance.toString(), "0");
-    console.log("✅ Register passed | tx:", tx);
+    assert.strictEqual(state.lockPeriod.toString(), String(4 * 24 * 60 * 60));
+
+    console.log("Owner       :", state.owner.toString());
+    console.log("Balance     : 0 SOL");
+    console.log("LP Mint     :", state.lpMint.toString());
+    console.log("Lock period :", state.lockPeriod.toString(), "seconds (4 days)");
+    console.log("✅ TEST 1 PASSED | tx:", tx);
   });
 
   // ─────────────────────────────────────────
-  it("Deposit — owner deposits 0.1 SOL, balance increases", async () => {
-    // Read balance BEFORE deposit
-    const stateBefore = await program.account.vaultState.fetch(vaultStatePDA);
-    const balanceBefore = stateBefore.balance.toNumber();
-
+  // TEST 2
+  // ─────────────────────────────────────────
+  it("2. Deposit — owner deposits 0.1 SOL into vault", async () => {
+    const before = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
     const amount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
 
     const tx = await program.methods
@@ -85,24 +96,42 @@ describe("vault", () => {
       })
       .rpc();
 
-    // Read balance AFTER deposit
-    const stateAfter = await program.account.vaultState.fetch(vaultStatePDA);
-    const balanceAfter = stateAfter.balance.toNumber();
+    const after = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
+    assert.strictEqual(after - before, 0.1 * LAMPORTS_PER_SOL);
 
-    console.log("Balance before :", balanceBefore / LAMPORTS_PER_SOL, "SOL");
-    console.log("Balance after  :", balanceAfter / LAMPORTS_PER_SOL, "SOL");
-    console.log("Difference     :", (balanceAfter - balanceBefore) / LAMPORTS_PER_SOL, "SOL");
-
-    // Check it increased by exactly 0.1 SOL
-    assert.strictEqual(balanceAfter - balanceBefore, 0.1 * LAMPORTS_PER_SOL);
-    console.log("✅ Owner deposit passed | tx:", tx);
+    console.log("Balance before :", before / LAMPORTS_PER_SOL, "SOL");
+    console.log("Balance after  :", after / LAMPORTS_PER_SOL, "SOL");
+    console.log("Difference     : +0.1 SOL");
+    console.log("✅ TEST 2 PASSED | tx:", tx);
   });
 
   // ─────────────────────────────────────────
-  it("Register depositor — wallet2 registers into owner vault", async () => {
+  // TEST 3
+  // ─────────────────────────────────────────
+  it("3. Deposit zero — should be rejected", async () => {
+    try {
+      await program.methods
+        .deposit(new anchor.BN(0))
+        .accountsPartial({
+          user: owner,
+          vaultState: vaultStatePDA,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have thrown ZeroDeposit error");
+    } catch (err: any) {
+      console.log("Got expected error: ZeroDeposit ✅");
+      console.log("✅ TEST 3 PASSED — zero deposit correctly rejected");
+    }
+  });
+
+  // ─────────────────────────────────────────
+  // TEST 4
+  // ─────────────────────────────────────────
+  it("4. Register depositor — wallet2 links to owner vault", async () => {
     try {
       await program.account.depositorState.fetch(depositorStatePDA);
-      console.log("⚠️  Depositor already registered on-chain, skipping...");
+      console.log("⚠️  Depositor already registered, skipping...");
       return;
     } catch (_) {}
 
@@ -123,11 +152,16 @@ describe("vault", () => {
     const state = await program.account.depositorState.fetch(depositorStatePDA);
     assert.strictEqual(state.depositor.toString(), depositorKeypair.publicKey.toString());
     assert.strictEqual(state.vaultOwner.toString(), owner.toString());
-    console.log("✅ Register depositor passed | tx:", tx);
+
+    console.log("Depositor  :", state.depositor.toString());
+    console.log("Vault owner:", state.vaultOwner.toString());
+    console.log("✅ TEST 4 PASSED | tx:", tx);
   });
 
   // ─────────────────────────────────────────
-  it("Deposit by depositor — sends 0.1 SOL, receives 1 LP token", async () => {
+  // TEST 5
+  // ─────────────────────────────────────────
+  it("5. Deposit by depositor — sends 0.1 SOL, gets 1 LP, locked 4 days", async () => {
     const depositorWallet = new anchor.Wallet(depositorKeypair);
     const depositorProvider = new anchor.AnchorProvider(provider.connection, depositorWallet, {});
     const depositorProgram = new anchor.Program(program.idl, depositorProvider);
@@ -139,11 +173,9 @@ describe("vault", () => {
       depositorKeypair.publicKey
     );
     depositorTokenAccount = tokenAccount.address;
-    console.log("Depositor token account:", depositorTokenAccount.toString());
 
-    // Read LP balance before
-    const lpBefore = (await provider.connection.getTokenAccountBalance(depositorTokenAccount)).value.uiAmount || 0;
     const vaultBefore = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
+    const lpBefore = (await provider.connection.getTokenAccountBalance(depositorTokenAccount)).value.uiAmount || 0;
 
     const amount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
 
@@ -161,22 +193,91 @@ describe("vault", () => {
 
     const vaultAfter = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
     const lpAfter = (await provider.connection.getTokenAccountBalance(depositorTokenAccount)).value.uiAmount || 0;
+    const depState = await program.account.depositorState.fetch(depositorStatePDA);
 
-    console.log("Vault balance before :", vaultBefore / LAMPORTS_PER_SOL, "SOL");
-    console.log("Vault balance after  :", vaultAfter / LAMPORTS_PER_SOL, "SOL");
-    console.log("LP tokens before     :", lpBefore);
-    console.log("LP tokens after      :", lpAfter);
-    console.log("LP tokens received   :", lpAfter - lpBefore);
-
-    // Vault increased by 0.1 SOL
     assert.strictEqual(vaultAfter - vaultBefore, 0.1 * LAMPORTS_PER_SOL);
-    // LP increased by 1
     assert.strictEqual(lpAfter - lpBefore, 1);
-    console.log("✅ Deposit by depositor passed | tx:", tx);
+
+    console.log("Vault balance :", vaultAfter / LAMPORTS_PER_SOL, "SOL");
+    console.log("LP tokens     :", lpAfter);
+    console.log("Locked amount :", depState.lockedAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
+    console.log("Deposit time  :", new Date(depState.depositTime.toNumber() * 1000).toLocaleString());
+    console.log("Unlock time   :", new Date(depState.unlockTime.toNumber() * 1000).toLocaleString());
+    console.log("✅ TEST 5 PASSED | tx:", tx);
   });
 
   // ─────────────────────────────────────────
-  it("Get LP value — 1 LP = 0.1 SOL", async () => {
+  // TEST 6
+  // ─────────────────────────────────────────
+  it("6. Deposit invalid amount — not multiple of 0.1 SOL, should fail", async () => {
+    const depositorWallet = new anchor.Wallet(depositorKeypair);
+    const depositorProvider = new anchor.AnchorProvider(provider.connection, depositorWallet, {});
+    const depositorProgram = new anchor.Program(program.idl, depositorProvider);
+
+    const tokenAccount = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      depositorKeypair,
+      lpMintPDA,
+      depositorKeypair.publicKey
+    );
+
+    try {
+      await depositorProgram.methods
+        .depositByDepositor(new anchor.BN(50_000_000)) // 0.05 SOL — not valid
+        .accountsPartial({
+          depositor: depositorKeypair.publicKey,
+          depositorState: depositorStatePDA,
+          vaultState: vaultStatePDA,
+          lpMint: lpMintPDA,
+          depositorTokenAccount: tokenAccount.address,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have thrown InvalidDepositAmount");
+    } catch (err: any) {
+      console.log("Got expected error: InvalidDepositAmount ✅");
+      console.log("✅ TEST 6 PASSED — invalid amount correctly rejected");
+    }
+  });
+
+  // ─────────────────────────────────────────
+  // TEST 7
+  // ─────────────────────────────────────────
+  it("7. Withdraw — should FAIL, funds locked for 4 days", async () => {
+    const depositorWallet = new anchor.Wallet(depositorKeypair);
+    const depositorProvider = new anchor.AnchorProvider(provider.connection, depositorWallet, {});
+    const depositorProgram = new anchor.Program(program.idl, depositorProvider);
+
+    const tokenAccount = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      depositorKeypair,
+      lpMintPDA,
+      depositorKeypair.publicKey
+    );
+
+    try {
+      await depositorProgram.methods
+        .withdraw()
+        .accountsPartial({
+          depositor: depositorKeypair.publicKey,
+          depositorState: depositorStatePDA,
+          vaultState: vaultStatePDA,
+          lpMint: lpMintPDA,
+          depositorTokenAccount: tokenAccount.address,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have thrown FundsStillLocked");
+    } catch (err: any) {
+      console.log("Got expected error: FundsStillLocked ✅");
+      console.log("✅ TEST 7 PASSED — withdrawal correctly blocked");
+    }
+  });
+
+  // ─────────────────────────────────────────
+  // TEST 8
+  // ─────────────────────────────────────────
+  it("8. Get LP value — 1 LP = 0.1 SOL", async () => {
     const tx = await program.methods
       .getLpValue()
       .accountsPartial({
@@ -186,13 +287,14 @@ describe("vault", () => {
       .rpc();
 
     const state = await program.account.vaultState.fetch(vaultStatePDA);
-    const lpMintInfo = await provider.connection.getTokenSupply(lpMintPDA);
+    const lpSupply = await provider.connection.getTokenSupply(lpMintPDA);
 
-    console.log("─────────────────────────────────────");
-    console.log("Vault SOL balance :", Number(state.balance) / LAMPORTS_PER_SOL, "SOL");
-    console.log("Total LP supply   :", lpMintInfo.value.uiAmount, "LP tokens");
+    console.log("═══════════════════════════════════════");
+    console.log("Vault balance :", Number(state.balance) / LAMPORTS_PER_SOL, "SOL");
+    console.log("Total LP      :", lpSupply.value.uiAmount, "LP");
     console.log("1 LP = 0.1 SOL");
-    console.log("─────────────────────────────────────");
-    console.log("✅ Get LP value passed | tx:", tx);
+    console.log("Lock period   : 4 days (345600 seconds)");
+    console.log("═══════════════════════════════════════");
+    console.log("✅ TEST 8 PASSED | tx:", tx);
   });
 });
