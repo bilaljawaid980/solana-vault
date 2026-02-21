@@ -163,6 +163,31 @@ pub mod vault {
         msg!("1 LP = {} lamports (0.1 SOL)", LP_PRICE_IN_LAMPORTS);
         Ok(())
     }
+
+    // ─────────────────────────────────────────
+    // Admin Transfer — only vault owner
+    // Transfers SOL from vault to any wallet
+    // ─────────────────────────────────────────
+    pub fn admin_transfer(ctx: Context<AdminTransfer>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroDeposit);
+        require!(
+            ctx.accounts.vault_state.balance >= amount,
+            VaultError::NotEnoughFunds
+        );
+
+        // Move lamports from vault PDA → destination wallet
+        **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.destination.to_account_info().try_borrow_mut_lamports()? += amount;
+
+        // Update vault balance
+        ctx.accounts.vault_state.balance -= amount;
+
+        msg!("Admin transfer by: {}", ctx.accounts.owner.key());
+        msg!("Destination      : {}", ctx.accounts.destination.key());
+        msg!("Amount           : {} lamports", amount);
+        msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────
@@ -323,6 +348,31 @@ pub struct GetLpValue<'info> {
 }
 
 // ─────────────────────────────────────────
+// Admin Transfer Context
+// ─────────────────────────────────────────
+#[derive(Accounts)]
+pub struct AdminTransfer<'info> {
+    #[account(
+        mut,
+        constraint = owner.key() == vault_state.owner @ VaultError::UnauthorizedUser
+    )]
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault3", owner.key().as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Account<'info, VaultState>,
+
+    /// CHECK: destination can be any wallet
+    #[account(mut)]
+    pub destination: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+// ─────────────────────────────────────────
 // State
 // ─────────────────────────────────────────
 
@@ -373,4 +423,6 @@ pub enum VaultError {
     FundsStillLocked,
     #[msg("Nothing to withdraw")]
     NothingToWithdraw,
+    #[msg("Vault does not have enough funds")]
+    NotEnoughFunds,
 }
