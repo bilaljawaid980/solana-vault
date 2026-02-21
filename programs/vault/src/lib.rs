@@ -6,6 +6,7 @@ declare_id!("DmvnbCoGjvP8zfEZeBkrHft2EMQpkjuQ4wZq1AFt7dEL");
 
 const LP_PRICE_IN_LAMPORTS: u64 = 100_000_000;
 const FOUR_DAYS_IN_SECONDS: i64 = 4 * 24 * 60 * 60;
+const EARLY_WITHDRAW_PENALTY_BPS: u64 = 30; // 30%
 
 #[program]
 pub mod vault {
@@ -155,6 +156,68 @@ pub mod vault {
         Ok(())
     }
 
+    // ─────────────────────────────────────────
+    // Early Withdraw — 30% penalty
+    // User exits before lock period ends
+    // 30% stays in vault, 70% returned to user
+    // ─────────────────────────────────────────
+    pub fn early_withdraw(ctx: Context<EarlyWithdraw>) -> Result<()> {
+        let clock = Clock::get()?;
+        let current_time = clock.unix_timestamp;
+        let unlock_time = ctx.accounts.depositor_state.unlock_time;
+
+        // If lock already expired, tell user to use normal withdraw
+        require!(current_time < unlock_time, VaultError::LockAlreadyExpired);
+
+        let locked_amount = ctx.accounts.depositor_state.locked_amount;
+        let lp_amount = ctx.accounts.depositor_state.lp_amount;
+        require!(locked_amount > 0, VaultError::NothingToWithdraw);
+
+        // Calculate penalty and payout
+        // penalty = 30% of locked_amount
+        let penalty = locked_amount * EARLY_WITHDRAW_PENALTY_BPS / 100;
+        let user_gets = locked_amount - penalty;
+
+        let vault_owner = ctx.accounts.vault_state.owner;
+        let lp_mint_bump = ctx.accounts.vault_state.lp_mint_bump;
+        let seeds = &[b"lp_mint3", vault_owner.as_ref(), &[lp_mint_bump]];
+        let signer_seeds = &[&seeds[..]];
+
+        // Burn all LP tokens
+        let burn_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Burn {
+                mint: ctx.accounts.lp_mint.to_account_info(),
+                from: ctx.accounts.depositor_token_account.to_account_info(),
+                authority: ctx.accounts.lp_mint.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::burn(burn_ctx, lp_amount)?;
+
+        // Transfer only user_gets to depositor
+        // penalty stays inside vault naturally
+        **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= user_gets;
+        **ctx.accounts.depositor.to_account_info().try_borrow_mut_lamports()? += user_gets;
+
+        // Vault balance: subtract only user_gets, penalty stays
+        ctx.accounts.vault_state.balance -= user_gets;
+
+        // Reset depositor state
+        ctx.accounts.depositor_state.locked_amount = 0;
+        ctx.accounts.depositor_state.lp_amount = 0;
+        ctx.accounts.depositor_state.deposit_time = 0;
+        ctx.accounts.depositor_state.unlock_time = 0;
+
+        msg!("Early withdrawal executed!");
+        msg!("Locked amount    : {} lamports", locked_amount);
+        msg!("Penalty (30%)    : {} lamports", penalty);
+        msg!("User received    : {} lamports", user_gets);
+        msg!("LP tokens burned : {}", lp_amount);
+        msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
+        Ok(())
+    }
+
     pub fn get_lp_value(ctx: Context<GetLpValue>) -> Result<()> {
         let vault_balance = ctx.accounts.vault_state.balance;
         let lp_supply = ctx.accounts.lp_mint.supply;
@@ -166,7 +229,6 @@ pub mod vault {
 
     // ─────────────────────────────────────────
     // Admin Transfer — only vault owner
-    // Transfers SOL from vault to any wallet
     // ─────────────────────────────────────────
     pub fn admin_transfer(ctx: Context<AdminTransfer>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroDeposit);
@@ -175,11 +237,9 @@ pub mod vault {
             VaultError::NotEnoughFunds
         );
 
-        // Move lamports from vault PDA → destination wallet
         **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.destination.to_account_info().try_borrow_mut_lamports()? += amount;
 
-        // Update vault balance
         ctx.accounts.vault_state.balance -= amount;
 
         msg!("Admin transfer by: {}", ctx.accounts.owner.key());
@@ -332,6 +392,44 @@ pub struct Withdraw<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// ─────────────────────────────────────────
+// Early Withdraw Context
+// ─────────────────────────────────────────
+#[derive(Accounts)]
+pub struct EarlyWithdraw<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"depositor3", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        bump = depositor_state.bump,
+        constraint = depositor_state.depositor == depositor.key() @ VaultError::UnauthorizedUser,
+        constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
+    )]
+    pub depositor_state: Account<'info, DepositorState>,
+
+    #[account(
+        mut,
+        seeds = [b"vault3", vault_state.owner.as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Account<'info, VaultState>,
+
+    #[account(
+        mut,
+        seeds = [b"lp_mint3", vault_state.owner.as_ref()],
+        bump = vault_state.lp_mint_bump,
+    )]
+    pub lp_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub depositor_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
 #[derive(Accounts)]
 pub struct GetLpValue<'info> {
     #[account(
@@ -425,4 +523,6 @@ pub enum VaultError {
     NothingToWithdraw,
     #[msg("Vault does not have enough funds")]
     NotEnoughFunds,
+    #[msg("Lock period already expired, use normal withdraw instead")]
+    LockAlreadyExpired,
 }
