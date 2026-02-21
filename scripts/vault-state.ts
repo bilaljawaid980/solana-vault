@@ -4,7 +4,14 @@ import { Vault } from "../target/types/vault";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 
 async function main() {
-  const provider = anchor.AnchorProvider.env();
+  const connection = new anchor.web3.Connection(
+    "https://api.devnet.solana.com",
+    "confirmed"
+  );
+  const wallet = anchor.AnchorProvider.env().wallet;
+  const provider = new anchor.AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+  });
   anchor.setProvider(provider);
   const program = anchor.workspace.Vault as Program<Vault>;
   const owner = provider.wallet.publicKey;
@@ -69,16 +76,20 @@ async function main() {
     const isAdminTransfer = logs.some(log => log.includes("Instruction: AdminTransfer"));
 
     if (isAdminTransfer) {
-      // Extract destination and amount from logs
       let destination = "";
       let amount = "";
 
       for (const log of logs) {
-        if (log.includes("Destination")) {
-          destination = log.split(": ")[1]?.trim() || "";
+        // log format: "Program log: Destination      : <address>"
+        if (log.includes("Destination      :")) {
+          const parts = log.split("Destination      :");
+          destination = parts[1]?.trim() || "";
         }
-        if (log.includes("Amount")) {
-          amount = log.split(": ")[1]?.trim() || "";
+        // log format: "Program log: Amount           : <number> lamports"
+        if (log.includes("Amount           :")) {
+          const parts = log.split("Amount           :");
+          const raw = parts[1]?.trim() || "";
+          amount = raw.replace("lamports", "").trim();
         }
       }
 
