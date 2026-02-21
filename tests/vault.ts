@@ -1,4 +1,3 @@
-
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Vault } from "../target/types/vault";
@@ -223,7 +222,7 @@ describe("vault — full test suite", () => {
 
     try {
       await depositorProgram.methods
-        .depositByDepositor(new anchor.BN(50_000_000)) // 0.05 SOL — not valid
+        .depositByDepositor(new anchor.BN(50_000_000))
         .accountsPartial({
           depositor: depositorKeypair.publicKey,
           depositorState: depositorStatePDA,
@@ -296,5 +295,72 @@ describe("vault — full test suite", () => {
     console.log("Lock period   : 4 days (345600 seconds)");
     console.log("═══════════════════════════════════════");
     console.log("✅ TEST 8 PASSED | tx:", tx);
+  });
+
+  // ─────────────────────────────────────────
+  // TEST 9
+  // ─────────────────────────────────────────
+  it("9. Admin transfer — owner transfers SOL to any wallet", async () => {
+    // Use depositor wallet as destination
+    const destination = depositorKeypair.publicKey;
+
+    const vaultBefore = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
+    const destBefore = await provider.connection.getBalance(destination);
+
+    // Transfer 0.1 SOL
+    const amount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
+
+    const tx = await program.methods
+      .adminTransfer(amount)
+      .accountsPartial({
+        owner: owner,
+        vaultState: vaultStatePDA,
+        destination: destination,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    const vaultAfter = (await program.account.vaultState.fetch(vaultStatePDA)).balance.toNumber();
+    const destAfter = await provider.connection.getBalance(destination);
+
+    // Vault decreased by 0.1 SOL
+    assert.strictEqual(vaultBefore - vaultAfter, 0.1 * LAMPORTS_PER_SOL);
+    // Destination increased by 0.1 SOL
+    assert.strictEqual(destAfter - destBefore, 0.1 * LAMPORTS_PER_SOL);
+
+    console.log("Destination   :", destination.toString());
+    console.log("Amount sent   : 0.1 SOL");
+    console.log("Vault before  :", vaultBefore / LAMPORTS_PER_SOL, "SOL");
+    console.log("Vault after   :", vaultAfter / LAMPORTS_PER_SOL, "SOL");
+    console.log("Dest before   :", destBefore / LAMPORTS_PER_SOL, "SOL");
+    console.log("Dest after    :", destAfter / LAMPORTS_PER_SOL, "SOL");
+    console.log("✅ TEST 9 PASSED | tx:", tx);
+  });
+
+  // ─────────────────────────────────────────
+  // TEST 10
+  // ─────────────────────────────────────────
+  it("10. Admin transfer — non-owner should be rejected", async () => {
+    const depositorWallet = new anchor.Wallet(depositorKeypair);
+    const depositorProvider = new anchor.AnchorProvider(provider.connection, depositorWallet, {});
+    const depositorProgram = new anchor.Program(program.idl, depositorProvider);
+
+    const amount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
+
+    try {
+      await depositorProgram.methods
+        .adminTransfer(amount)
+        .accountsPartial({
+          owner: depositorKeypair.publicKey,
+          vaultState: vaultStatePDA,
+          destination: depositorKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have thrown UnauthorizedUser error");
+    } catch (err: any) {
+      console.log("Got expected error: UnauthorizedUser ✅");
+      console.log("✅ TEST 10 PASSED — non-owner correctly rejected");
+    }
   });
 });
