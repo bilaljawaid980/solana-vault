@@ -166,7 +166,6 @@ pub mod vault {
 
     // ─────────────────────────────────────────
     // Admin Transfer — only vault owner
-    // Transfers SOL from vault to any wallet
     // ─────────────────────────────────────────
     pub fn admin_transfer(ctx: Context<AdminTransfer>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroDeposit);
@@ -175,11 +174,9 @@ pub mod vault {
             VaultError::NotEnoughFunds
         );
 
-        // Move lamports from vault PDA → destination wallet
         **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.destination.to_account_info().try_borrow_mut_lamports()? += amount;
 
-        // Update vault balance
         ctx.accounts.vault_state.balance -= amount;
 
         msg!("Admin transfer by: {}", ctx.accounts.owner.key());
