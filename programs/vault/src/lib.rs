@@ -4,8 +4,8 @@ use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
 
 declare_id!("DmvnbCoGjvP8zfEZeBkrHft2EMQpkjuQ4wZq1AFt7dEL");
 
-const LP_PRICE_IN_LAMPORTS: u64 = 100_000_000;
 const FOUR_DAYS_IN_SECONDS: i64 = 4 * 24 * 60 * 60;
+const DEFAULT_MIN_DEPOSIT: u64 = 100_000_000; // 0.1 SOL
 
 #[program]
 pub mod vault {
@@ -19,10 +19,12 @@ pub mod vault {
         vault_state.lp_mint = ctx.accounts.lp_mint.key();
         vault_state.lp_mint_bump = ctx.bumps.lp_mint;
         vault_state.lock_period = FOUR_DAYS_IN_SECONDS;
+        vault_state.min_deposit = DEFAULT_MIN_DEPOSIT;
 
         msg!("Vault registered for owner: {}", vault_state.owner);
         msg!("LP Mint created: {}", vault_state.lp_mint);
         msg!("Lock period: {} seconds (4 days)", vault_state.lock_period);
+        msg!("Min deposit: {} lamports", vault_state.min_deposit);
         Ok(())
     }
 
@@ -60,8 +62,11 @@ pub mod vault {
     }
 
     pub fn deposit_by_depositor(ctx: Context<DepositByDepositor>, amount: u64) -> Result<()> {
+        let min_deposit = ctx.accounts.vault_state.min_deposit;
+
         require!(amount > 0, VaultError::ZeroDeposit);
-        require!(amount % LP_PRICE_IN_LAMPORTS == 0, VaultError::InvalidDepositAmount);
+        require!(amount >= min_deposit, VaultError::BelowMinDeposit);
+        require!(amount % min_deposit == 0, VaultError::InvalidDepositAmount);
 
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -85,10 +90,10 @@ pub mod vault {
         depositor_state.unlock_time = current_time + lock_period;
         depositor_state.locked_amount += amount;
 
-        let lp_to_mint = amount / LP_PRICE_IN_LAMPORTS;
+        let lp_to_mint = amount / min_deposit;
         depositor_state.lp_amount += lp_to_mint;
 
-        let seeds = &[b"lp_mint3", vault_owner.as_ref(), &[lp_mint_bump]];
+        let seeds = &[b"lp_mint4", vault_owner.as_ref(), &[lp_mint_bump]];
         let signer_seeds = &[&seeds[..]];
 
         let mint_ctx = CpiContext::new_with_signer(
@@ -106,7 +111,7 @@ pub mod vault {
         msg!("LP tokens minted: {}", lp_to_mint);
         msg!("Deposit time: {}", current_time);
         msg!("Unlock time: {}", depositor_state.unlock_time);
-        msg!("Locked for 4 days ({} seconds)", lock_period);
+        msg!("Lock period: {} seconds", lock_period);
         msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
         Ok(())
     }
@@ -124,7 +129,7 @@ pub mod vault {
 
         let vault_owner = ctx.accounts.vault_state.owner;
         let lp_mint_bump = ctx.accounts.vault_state.lp_mint_bump;
-        let seeds = &[b"lp_mint3", vault_owner.as_ref(), &[lp_mint_bump]];
+        let seeds = &[b"lp_mint4", vault_owner.as_ref(), &[lp_mint_bump]];
         let signer_seeds = &[&seeds[..]];
 
         let burn_ctx = CpiContext::new_with_signer(
@@ -160,7 +165,7 @@ pub mod vault {
         let lp_supply = ctx.accounts.lp_mint.supply;
         msg!("Vault SOL balance : {} lamports", vault_balance);
         msg!("Total LP supply   : {} tokens", lp_supply);
-        msg!("1 LP = {} lamports (0.1 SOL)", LP_PRICE_IN_LAMPORTS);
+        msg!("1 LP = {} lamports", ctx.accounts.vault_state.min_deposit);
         Ok(())
     }
 
@@ -185,6 +190,32 @@ pub mod vault {
         msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
         Ok(())
     }
+
+    // ─────────────────────────────────────────
+    // Update Settings — only vault owner
+    // Admin can change lock period and min deposit
+    // ─────────────────────────────────────────
+    pub fn update_settings(
+        ctx: Context<UpdateSettings>,
+        new_lock_period: i64,
+        new_min_deposit: u64,
+    ) -> Result<()> {
+        require!(new_lock_period > 0, VaultError::InvalidLockPeriod);
+        require!(new_min_deposit > 0, VaultError::InvalidMinDeposit);
+
+        let vault_state = &mut ctx.accounts.vault_state;
+
+        let old_lock_period = vault_state.lock_period;
+        let old_min_deposit = vault_state.min_deposit;
+
+        vault_state.lock_period = new_lock_period;
+        vault_state.min_deposit = new_min_deposit;
+
+        msg!("Settings updated by admin: {}", ctx.accounts.owner.key());
+        msg!("Lock period: {} → {} seconds", old_lock_period, new_lock_period);
+        msg!("Min deposit: {} → {} lamports", old_min_deposit, new_min_deposit);
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────
@@ -200,7 +231,7 @@ pub struct Register<'info> {
         init,
         payer = user,
         space = VaultState::SIZE,
-        seeds = [b"vault3", user.key().as_ref()],
+        seeds = [b"vault4", user.key().as_ref()],
         bump
     )]
     pub vault_state: Account<'info, VaultState>,
@@ -210,7 +241,7 @@ pub struct Register<'info> {
         payer = user,
         mint::decimals = 0,
         mint::authority = lp_mint,
-        seeds = [b"lp_mint3", user.key().as_ref()],
+        seeds = [b"lp_mint4", user.key().as_ref()],
         bump
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -227,7 +258,7 @@ pub struct Deposit<'info> {
 
     #[account(
         mut,
-        seeds = [b"vault3", user.key().as_ref()],
+        seeds = [b"vault4", user.key().as_ref()],
         bump = vault_state.bump,
         constraint = vault_state.owner == user.key() @ VaultError::UnauthorizedUser
     )]
@@ -242,7 +273,7 @@ pub struct RegisterDepositor<'info> {
     pub depositor: Signer<'info>,
 
     #[account(
-        seeds = [b"vault3", vault_state.owner.as_ref()],
+        seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
@@ -251,7 +282,7 @@ pub struct RegisterDepositor<'info> {
         init,
         payer = depositor,
         space = DepositorState::SIZE,
-        seeds = [b"depositor3", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
         bump
     )]
     pub depositor_state: Account<'info, DepositorState>,
@@ -266,7 +297,7 @@ pub struct DepositByDepositor<'info> {
 
     #[account(
         mut,
-        seeds = [b"depositor3", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
         bump = depositor_state.bump,
         constraint = depositor_state.depositor == depositor.key() @ VaultError::UnauthorizedUser,
         constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
@@ -275,14 +306,14 @@ pub struct DepositByDepositor<'info> {
 
     #[account(
         mut,
-        seeds = [b"vault3", vault_state.owner.as_ref()],
+        seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
 
     #[account(
         mut,
-        seeds = [b"lp_mint3", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -301,7 +332,7 @@ pub struct Withdraw<'info> {
 
     #[account(
         mut,
-        seeds = [b"depositor3", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
         bump = depositor_state.bump,
         constraint = depositor_state.depositor == depositor.key() @ VaultError::UnauthorizedUser,
         constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
@@ -310,14 +341,14 @@ pub struct Withdraw<'info> {
 
     #[account(
         mut,
-        seeds = [b"vault3", vault_state.owner.as_ref()],
+        seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
 
     #[account(
         mut,
-        seeds = [b"lp_mint3", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -332,21 +363,18 @@ pub struct Withdraw<'info> {
 #[derive(Accounts)]
 pub struct GetLpValue<'info> {
     #[account(
-        seeds = [b"vault3", vault_state.owner.as_ref()],
+        seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
 
     #[account(
-        seeds = [b"lp_mint3", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
 }
 
-// ─────────────────────────────────────────
-// Admin Transfer Context
-// ─────────────────────────────────────────
 #[derive(Accounts)]
 pub struct AdminTransfer<'info> {
     #[account(
@@ -357,7 +385,7 @@ pub struct AdminTransfer<'info> {
 
     #[account(
         mut,
-        seeds = [b"vault3", owner.key().as_ref()],
+        seeds = [b"vault4", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
@@ -365,6 +393,27 @@ pub struct AdminTransfer<'info> {
     /// CHECK: destination can be any wallet
     #[account(mut)]
     pub destination: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+// ─────────────────────────────────────────
+// Update Settings Context
+// ─────────────────────────────────────────
+#[derive(Accounts)]
+pub struct UpdateSettings<'info> {
+    #[account(
+        mut,
+        constraint = owner.key() == vault_state.owner @ VaultError::UnauthorizedUser
+    )]
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault4", owner.key().as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Account<'info, VaultState>,
 
     pub system_program: Program<'info, System>,
 }
@@ -381,10 +430,11 @@ pub struct VaultState {
     pub lp_mint: Pubkey,     // 32
     pub lp_mint_bump: u8,    // 1
     pub lock_period: i64,    // 8
+    pub min_deposit: u64,    // 8  ← NEW
 }
 
 impl VaultState {
-    pub const SIZE: usize = 8 + 32 + 8 + 1 + 32 + 1 + 8;
+    pub const SIZE: usize = 8 + 32 + 8 + 1 + 32 + 1 + 8 + 8;
 }
 
 #[account]
@@ -414,12 +464,18 @@ pub enum VaultError {
     UnauthorizedUser,
     #[msg("Depositor is not registered to this vault")]
     WrongVault,
-    #[msg("Deposit must be a multiple of 0.1 SOL (100000000 lamports)")]
+    #[msg("Deposit must be a multiple of minimum deposit amount")]
     InvalidDepositAmount,
+    #[msg("Deposit is below the minimum deposit amount")]
+    BelowMinDeposit,
     #[msg("Funds are still locked, please wait until unlock time")]
     FundsStillLocked,
     #[msg("Nothing to withdraw")]
     NothingToWithdraw,
     #[msg("Vault does not have enough funds")]
     NotEnoughFunds,
+    #[msg("Lock period must be greater than zero")]
+    InvalidLockPeriod,
+    #[msg("Minimum deposit must be greater than zero")]
+    InvalidMinDeposit,
 }

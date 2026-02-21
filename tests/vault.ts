@@ -24,15 +24,15 @@ describe("vault — full test suite", () => {
 
   before(async () => {
     [vaultStatePDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault3"), owner.toBuffer()],
+      [Buffer.from("vault4"), owner.toBuffer()],
       program.programId
     );
     [lpMintPDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("lp_mint3"), owner.toBuffer()],
+      [Buffer.from("lp_mint4"), owner.toBuffer()],
       program.programId
     );
     [depositorStatePDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("depositor3"), depositorKeypair.publicKey.toBuffer(), owner.toBuffer()],
+      [Buffer.from("depositor4"), depositorKeypair.publicKey.toBuffer(), owner.toBuffer()],
       program.programId
     );
 
