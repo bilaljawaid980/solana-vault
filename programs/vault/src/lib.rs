@@ -5,7 +5,7 @@ use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
 declare_id!("DmvnbCoGjvP8zfEZeBkrHft2EMQpkjuQ4wZq1AFt7dEL");
 
 const FOUR_DAYS_IN_SECONDS: i64 = 4 * 24 * 60 * 60;
-const DEFAULT_MIN_DEPOSIT: u64 = 100_000_000; // 0.1 SOL
+const DEFAULT_MIN_DEPOSIT: u64 = 100_000_000;
 
 #[program]
 pub mod vault {
@@ -20,7 +20,8 @@ pub mod vault {
         vault_state.lp_mint_bump = ctx.bumps.lp_mint;
         vault_state.lock_period = FOUR_DAYS_IN_SECONDS;
         vault_state.min_deposit = DEFAULT_MIN_DEPOSIT;
-
+        vault_state.total_yield_added = 0;
+        vault_state.fee_percent = 0;
         msg!("Vault registered for owner: {}", vault_state.owner);
         msg!("LP Mint created: {}", vault_state.lp_mint);
         msg!("Lock period: {} seconds (4 days)", vault_state.lock_period);
@@ -30,7 +31,6 @@ pub mod vault {
 
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroDeposit);
-
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
             system_program::Transfer {
@@ -40,33 +40,43 @@ pub mod vault {
         );
         system_program::transfer(cpi_ctx, amount)?;
         ctx.accounts.vault_state.balance += amount;
-
         msg!("Owner deposited: {} lamports", amount);
         msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
         Ok(())
     }
 
-    pub fn register_depositor(ctx: Context<RegisterDepositor>) -> Result<()> {
-        let depositor_state = &mut ctx.accounts.depositor_state;
-        depositor_state.depositor = ctx.accounts.depositor.key();
-        depositor_state.vault_owner = ctx.accounts.vault_state.owner;
-        depositor_state.bump = ctx.bumps.depositor_state;
-        depositor_state.deposit_time = 0;
-        depositor_state.unlock_time = 0;
-        depositor_state.locked_amount = 0;
-        depositor_state.lp_amount = 0;
-
-        msg!("Depositor registered: {}", depositor_state.depositor);
-        msg!("Linked to vault owner: {}", depositor_state.vault_owner);
-        Ok(())
-    }
-
     pub fn deposit_by_depositor(ctx: Context<DepositByDepositor>, amount: u64) -> Result<()> {
         let min_deposit = ctx.accounts.vault_state.min_deposit;
-
         require!(amount > 0, VaultError::ZeroDeposit);
         require!(amount >= min_deposit, VaultError::BelowMinDeposit);
         require!(amount % min_deposit == 0, VaultError::InvalidDepositAmount);
+
+        let vault_balance_before = ctx.accounts.vault_state.balance;
+        let lp_supply_before = ctx.accounts.lp_mint.supply;
+
+        let lp_to_mint: u64 = if lp_supply_before == 0 || vault_balance_before == 0 {
+            amount / min_deposit
+        } else {
+            (amount as u128)
+                .checked_mul(lp_supply_before as u128)
+                .unwrap()
+                .checked_div(vault_balance_before as u128)
+                .unwrap() as u64
+        };
+
+        require!(lp_to_mint > 0, VaultError::ZeroLpMinted);
+
+        let depositor_state = &mut ctx.accounts.depositor_state;
+        if depositor_state.depositor == Pubkey::default() {
+            depositor_state.depositor = ctx.accounts.depositor.key();
+            depositor_state.vault_owner = ctx.accounts.vault_state.owner;
+            depositor_state.bump = ctx.bumps.depositor_state;
+            depositor_state.deposit_time = 0;
+            depositor_state.unlock_time = 0;
+            depositor_state.locked_amount = 0;
+            depositor_state.lp_amount = 0;
+            msg!("New depositor auto-registered: {}", depositor_state.depositor);
+        }
 
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -89,8 +99,6 @@ pub mod vault {
         depositor_state.deposit_time = current_time;
         depositor_state.unlock_time = current_time + lock_period;
         depositor_state.locked_amount += amount;
-
-        let lp_to_mint = amount / min_deposit;
         depositor_state.lp_amount += lp_to_mint;
 
         let seeds = &[b"lp_mint4", vault_owner.as_ref(), &[lp_mint_bump]];
@@ -107,12 +115,12 @@ pub mod vault {
         );
         token::mint_to(mint_ctx, lp_to_mint)?;
 
-        msg!("Depositor sent: {} lamports", amount);
-        msg!("LP tokens minted: {}", lp_to_mint);
-        msg!("Deposit time: {}", current_time);
-        msg!("Unlock time: {}", depositor_state.unlock_time);
-        msg!("Lock period: {} seconds", lock_period);
-        msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
+        msg!("Depositor sent      : {} lamports", amount);
+        msg!("LP tokens minted    : {}", lp_to_mint);
+        msg!("Vault balance before: {} lamports", vault_balance_before);
+        msg!("LP supply before    : {}", lp_supply_before);
+        msg!("Unlock time         : {}", depositor_state.unlock_time);
+        msg!("New vault balance   : {} lamports", ctx.accounts.vault_state.balance);
         Ok(())
     }
 
@@ -120,12 +128,23 @@ pub mod vault {
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
         let unlock_time = ctx.accounts.depositor_state.unlock_time;
-
         require!(current_time >= unlock_time, VaultError::FundsStillLocked);
 
-        let locked_amount = ctx.accounts.depositor_state.locked_amount;
         let lp_amount = ctx.accounts.depositor_state.lp_amount;
-        require!(locked_amount > 0, VaultError::NothingToWithdraw);
+        let locked_amount = ctx.accounts.depositor_state.locked_amount;
+        require!(lp_amount > 0, VaultError::NothingToWithdraw);
+
+        let vault_balance = ctx.accounts.vault_state.balance;
+        let lp_supply = ctx.accounts.lp_mint.supply;
+
+        let sol_to_return = (lp_amount as u128)
+            .checked_mul(vault_balance as u128)
+            .unwrap()
+            .checked_div(lp_supply as u128)
+            .unwrap() as u64;
+
+        require!(sol_to_return > 0, VaultError::NothingToWithdraw);
+        require!(vault_balance >= sol_to_return, VaultError::NotEnoughFunds);
 
         let vault_owner = ctx.accounts.vault_state.owner;
         let lp_mint_bump = ctx.accounts.vault_state.lp_mint_bump;
@@ -143,10 +162,12 @@ pub mod vault {
         );
         token::burn(burn_ctx, lp_amount)?;
 
-        **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= locked_amount;
-        **ctx.accounts.depositor.to_account_info().try_borrow_mut_lamports()? += locked_amount;
+        **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= sol_to_return;
+        **ctx.accounts.depositor.to_account_info().try_borrow_mut_lamports()? += sol_to_return;
 
-        ctx.accounts.vault_state.balance -= locked_amount;
+        ctx.accounts.vault_state.balance -= sol_to_return;
+
+        let yield_earned = sol_to_return.saturating_sub(locked_amount);
 
         ctx.accounts.depositor_state.locked_amount = 0;
         ctx.accounts.depositor_state.lp_amount = 0;
@@ -154,30 +175,73 @@ pub mod vault {
         ctx.accounts.depositor_state.unlock_time = 0;
 
         msg!("Withdrawal successful!");
-        msg!("SOL returned: {} lamports", locked_amount);
-        msg!("LP tokens burned: {}", lp_amount);
+        msg!("Original deposit : {} lamports", locked_amount);
+        msg!("SOL returned     : {} lamports", sol_to_return);
+        msg!("Yield earned     : {} lamports", yield_earned);
+        msg!("LP tokens burned : {}", lp_amount);
         msg!("New vault balance: {} lamports", ctx.accounts.vault_state.balance);
+        Ok(())
+    }
+
+    pub fn add_yield(ctx: Context<AddYield>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroDeposit);
+        let lp_supply = ctx.accounts.lp_mint.supply;
+        require!(lp_supply > 0, VaultError::NoDepositors);
+
+        let fee_percent = ctx.accounts.vault_state.fee_percent as u64;
+        let vault_balance_before = ctx.accounts.vault_state.balance;
+
+        // Calculate admin fee cut
+        let admin_cut = amount.checked_mul(fee_percent).unwrap().checked_div(100).unwrap();
+        let depositor_yield = amount.checked_sub(admin_cut).unwrap();
+
+        // Transfer full amount from owner to vault first
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.owner.to_account_info(),
+                to: ctx.accounts.vault_state.to_account_info(),
+            },
+        );
+        system_program::transfer(cpi_ctx, amount)?;
+
+        // Only depositor_yield goes into tracked balance
+        // admin_cut sits in vault lamports but not in balance
+        // so admin can retrieve it later via admin_transfer
+        ctx.accounts.vault_state.balance += depositor_yield;
+        ctx.accounts.vault_state.total_yield_added += depositor_yield;
+
+        let new_lp_price = ctx.accounts.vault_state.balance.checked_div(lp_supply).unwrap_or(0);
+
+        msg!("Yield added          : {} lamports", amount);
+        msg!("Admin fee ({} %)    : {} lamports", fee_percent, admin_cut);
+        msg!("Depositor yield      : {} lamports", depositor_yield);
+        msg!("Vault balance before : {} lamports", vault_balance_before);
+        msg!("Vault balance after  : {} lamports", ctx.accounts.vault_state.balance);
+        msg!("Total LP supply      : {}", lp_supply);
+        msg!("New LP price         : {} lamports per LP", new_lp_price);
+        msg!("Total yield ever     : {} lamports", ctx.accounts.vault_state.total_yield_added);
         Ok(())
     }
 
     pub fn get_lp_value(ctx: Context<GetLpValue>) -> Result<()> {
         let vault_balance = ctx.accounts.vault_state.balance;
         let lp_supply = ctx.accounts.lp_mint.supply;
-        msg!("Vault SOL balance : {} lamports", vault_balance);
-        msg!("Total LP supply   : {} tokens", lp_supply);
-        msg!("1 LP = {} lamports", ctx.accounts.vault_state.min_deposit);
+        let lp_price = if lp_supply > 0 {
+            vault_balance.checked_div(lp_supply).unwrap_or(0)
+        } else {
+            ctx.accounts.vault_state.min_deposit
+        };
+        msg!("Vault SOL balance  : {} lamports", vault_balance);
+        msg!("Total LP supply    : {} tokens", lp_supply);
+        msg!("Current LP price   : {} lamports per LP", lp_price);
+        msg!("Total yield added  : {} lamports", ctx.accounts.vault_state.total_yield_added);
         Ok(())
     }
 
-    // ─────────────────────────────────────────
-    // Admin Transfer — only vault owner
-    // ─────────────────────────────────────────
     pub fn admin_transfer(ctx: Context<AdminTransfer>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroDeposit);
-        require!(
-            ctx.accounts.vault_state.balance >= amount,
-            VaultError::NotEnoughFunds
-        );
+        require!(ctx.accounts.vault_state.balance >= amount, VaultError::NotEnoughFunds);
 
         **ctx.accounts.vault_state.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.destination.to_account_info().try_borrow_mut_lamports()? += amount;
@@ -191,42 +255,37 @@ pub mod vault {
         Ok(())
     }
 
-    // ─────────────────────────────────────────
-    // Update Settings — only vault owner
-    // Admin can change lock period and min deposit
-    // ─────────────────────────────────────────
     pub fn update_settings(
         ctx: Context<UpdateSettings>,
         new_lock_period: i64,
         new_min_deposit: u64,
+        new_fee_percent: u8,
     ) -> Result<()> {
         require!(new_lock_period > 0, VaultError::InvalidLockPeriod);
         require!(new_min_deposit > 0, VaultError::InvalidMinDeposit);
+        require!(new_fee_percent <= 100, VaultError::InvalidFeePercent);
 
         let vault_state = &mut ctx.accounts.vault_state;
-
-        let old_lock_period = vault_state.lock_period;
-        let old_min_deposit = vault_state.min_deposit;
+        let old_lock = vault_state.lock_period;
+        let old_min = vault_state.min_deposit;
+        let old_fee = vault_state.fee_percent;
 
         vault_state.lock_period = new_lock_period;
         vault_state.min_deposit = new_min_deposit;
+        vault_state.fee_percent = new_fee_percent;
 
-        msg!("Settings updated by admin: {}", ctx.accounts.owner.key());
-        msg!("Lock period: {} → {} seconds", old_lock_period, new_lock_period);
-        msg!("Min deposit: {} → {} lamports", old_min_deposit, new_min_deposit);
+        msg!("Settings updated!");
+        msg!("Lock period : {} → {} seconds", old_lock, new_lock_period);
+        msg!("Min deposit : {} → {} lamports", old_min, new_min_deposit);
+        msg!("Fee percent : {} → {} %", old_fee, new_fee_percent);
         Ok(())
     }
 }
-
-// ─────────────────────────────────────────
-// Account Contexts
-// ─────────────────────────────────────────
 
 #[derive(Accounts)]
 pub struct Register<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
-
     #[account(
         init,
         payer = user,
@@ -235,7 +294,6 @@ pub struct Register<'info> {
         bump
     )]
     pub vault_state: Account<'info, VaultState>,
-
     #[account(
         init,
         payer = user,
@@ -245,7 +303,6 @@ pub struct Register<'info> {
         bump
     )]
     pub lp_mint: Account<'info, Mint>,
-
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -255,7 +312,6 @@ pub struct Register<'info> {
 pub struct Deposit<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
-
     #[account(
         mut,
         seeds = [b"vault4", user.key().as_ref()],
@@ -263,30 +319,6 @@ pub struct Deposit<'info> {
         constraint = vault_state.owner == user.key() @ VaultError::UnauthorizedUser
     )]
     pub vault_state: Account<'info, VaultState>,
-
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct RegisterDepositor<'info> {
-    #[account(mut)]
-    pub depositor: Signer<'info>,
-
-    #[account(
-        seeds = [b"vault4", vault_state.owner.as_ref()],
-        bump = vault_state.bump,
-    )]
-    pub vault_state: Account<'info, VaultState>,
-
-    #[account(
-        init,
-        payer = depositor,
-        space = DepositorState::SIZE,
-        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
-        bump
-    )]
-    pub depositor_state: Account<'info, DepositorState>,
-
     pub system_program: Program<'info, System>,
 }
 
@@ -294,33 +326,28 @@ pub struct RegisterDepositor<'info> {
 pub struct DepositByDepositor<'info> {
     #[account(mut)]
     pub depositor: Signer<'info>,
-
     #[account(
-        mut,
+        init_if_needed,
+        payer = depositor,
+        space = DepositorState::SIZE,
         seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
-        bump = depositor_state.bump,
-        constraint = depositor_state.depositor == depositor.key() @ VaultError::UnauthorizedUser,
-        constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
+        bump
     )]
     pub depositor_state: Account<'info, DepositorState>,
-
     #[account(
         mut,
         seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
-
     #[account(
         mut,
         seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
-
     #[account(mut)]
     pub depositor_token_account: Account<'info, TokenAccount>,
-
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -329,7 +356,6 @@ pub struct DepositByDepositor<'info> {
 pub struct Withdraw<'info> {
     #[account(mut)]
     pub depositor: Signer<'info>,
-
     #[account(
         mut,
         seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
@@ -338,25 +364,42 @@ pub struct Withdraw<'info> {
         constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
     )]
     pub depositor_state: Account<'info, DepositorState>,
-
     #[account(
         mut,
         seeds = [b"vault4", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
-
     #[account(
         mut,
         seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
-
     #[account(mut)]
     pub depositor_token_account: Account<'info, TokenAccount>,
-
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AddYield<'info> {
+    #[account(
+        mut,
+        constraint = owner.key() == vault_state.owner @ VaultError::UnauthorizedUser
+    )]
+    pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [b"vault4", owner.key().as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Account<'info, VaultState>,
+    #[account(
+        seeds = [b"lp_mint4", owner.key().as_ref()],
+        bump = vault_state.lp_mint_bump,
+    )]
+    pub lp_mint: Account<'info, Mint>,
     pub system_program: Program<'info, System>,
 }
 
@@ -367,7 +410,6 @@ pub struct GetLpValue<'info> {
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
-
     #[account(
         seeds = [b"lp_mint4", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
@@ -382,24 +424,18 @@ pub struct AdminTransfer<'info> {
         constraint = owner.key() == vault_state.owner @ VaultError::UnauthorizedUser
     )]
     pub owner: Signer<'info>,
-
     #[account(
         mut,
         seeds = [b"vault4", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
-
     /// CHECK: destination can be any wallet
     #[account(mut)]
     pub destination: UncheckedAccount<'info>,
-
     pub system_program: Program<'info, System>,
 }
 
-// ─────────────────────────────────────────
-// Update Settings Context
-// ─────────────────────────────────────────
 #[derive(Accounts)]
 pub struct UpdateSettings<'info> {
     #[account(
@@ -407,34 +443,30 @@ pub struct UpdateSettings<'info> {
         constraint = owner.key() == vault_state.owner @ VaultError::UnauthorizedUser
     )]
     pub owner: Signer<'info>,
-
     #[account(
         mut,
         seeds = [b"vault4", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
-
     pub system_program: Program<'info, System>,
 }
 
-// ─────────────────────────────────────────
-// State
-// ─────────────────────────────────────────
-
 #[account]
 pub struct VaultState {
-    pub owner: Pubkey,       // 32
-    pub balance: u64,        // 8
-    pub bump: u8,            // 1
-    pub lp_mint: Pubkey,     // 32
-    pub lp_mint_bump: u8,    // 1
-    pub lock_period: i64,    // 8
-    pub min_deposit: u64,    // 8  ← NEW
+    pub owner: Pubkey,           // 32
+    pub balance: u64,            // 8
+    pub bump: u8,                // 1
+    pub lp_mint: Pubkey,         // 32
+    pub lp_mint_bump: u8,        // 1
+    pub lock_period: i64,        // 8
+    pub min_deposit: u64,        // 8
+    pub total_yield_added: u64,  // 8
+    pub fee_percent: u8,         // 1
 }
 
 impl VaultState {
-    pub const SIZE: usize = 8 + 32 + 8 + 1 + 32 + 1 + 8 + 8;
+    pub const SIZE: usize = 8 + 32 + 8 + 1 + 32 + 1 + 8 + 8 + 8 + 1;
 }
 
 #[account]
@@ -451,10 +483,6 @@ pub struct DepositorState {
 impl DepositorState {
     pub const SIZE: usize = 8 + 32 + 32 + 1 + 8 + 8 + 8 + 8;
 }
-
-// ─────────────────────────────────────────
-// Errors
-// ─────────────────────────────────────────
 
 #[error_code]
 pub enum VaultError {
@@ -478,4 +506,10 @@ pub enum VaultError {
     InvalidLockPeriod,
     #[msg("Minimum deposit must be greater than zero")]
     InvalidMinDeposit,
+    #[msg("Fee percent must be between 0 and 100")]
+    InvalidFeePercent,
+    #[msg("LP minted would be zero, deposit amount too small")]
+    ZeroLpMinted,
+    #[msg("No depositors in vault yet, cannot add yield")]
+    NoDepositors,
 }
