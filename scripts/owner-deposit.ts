@@ -1,4 +1,3 @@
-
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Vault } from "../target/types/vault";
@@ -22,7 +21,6 @@ async function main() {
   console.log("       VAULT DEPOSIT");
   console.log("═══════════════════════════════════════════");
 
-  // Ask wallet path
   const walletPath = await askQuestion("Enter your wallet keypair path: ");
   if (!fs.existsSync(walletPath)) {
     console.log("❌ Wallet file not found:", walletPath);
@@ -37,7 +35,6 @@ async function main() {
     rl.close(); return;
   }
 
-  // Ask vault owner
   const vaultOwnerInput = await askQuestion("Enter vault owner address: ");
   let vaultOwner: PublicKey;
   try {
@@ -53,17 +50,16 @@ async function main() {
   const program = anchor.workspace.Vault as Program<Vault>;
 
   const [vaultStatePDA] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault4"), vaultOwner.toBuffer()], program.programId
+    [Buffer.from("vault5"), vaultOwner.toBuffer()], program.programId
   );
   const [lpMintPDA] = PublicKey.findProgramAddressSync(
-    [Buffer.from("lp_mint4"), vaultOwner.toBuffer()], program.programId
+    [Buffer.from("lp_mint5"), vaultOwner.toBuffer()], program.programId
   );
   const [depositorStatePDA] = PublicKey.findProgramAddressSync(
-    [Buffer.from("depositor4"), userKeypair.publicKey.toBuffer(), vaultOwner.toBuffer()],
+    [Buffer.from("depositor5"), userKeypair.publicKey.toBuffer(), vaultOwner.toBuffer()],
     program.programId
   );
 
-  // Check vault exists
   let vaultState: any;
   try {
     vaultState = await program.account.vaultState.fetch(vaultStatePDA);
@@ -75,8 +71,16 @@ async function main() {
   const solBalance = await connection.getBalance(userKeypair.publicKey);
   const minDepositLamports = vaultState.minDeposit.toNumber();
   const minDepositSol = minDepositLamports / LAMPORTS_PER_SOL;
+  const feePercent = vaultState.feePercent ?? 0;
+  const vaultBalance = vaultState.balance.toNumber();
+  const lpSupply = (await connection.getTokenSupply(lpMintPDA)).value.uiAmount || 0;
 
-  // Check if first time depositor
+  // Current LP price — elastic
+  const currentLpPriceLamports = lpSupply > 0
+    ? vaultBalance / lpSupply
+    : minDepositLamports;
+  const currentLpPriceSol = currentLpPriceLamports / LAMPORTS_PER_SOL;
+
   let isFirstDeposit = false;
   try {
     await program.account.depositorState.fetch(depositorStatePDA);
@@ -85,20 +89,21 @@ async function main() {
   }
 
   console.log("───────────────────────────────────────────");
-  console.log("Your wallet   :", userKeypair.publicKey.toString());
-  console.log("Your SOL bal  :", solBalance / LAMPORTS_PER_SOL, "SOL");
+  console.log("VAULT INFO:");
   console.log("Vault owner   :", vaultOwner.toString());
-  console.log("Vault balance :", vaultState.balance.toNumber() / LAMPORTS_PER_SOL, "SOL");
+  console.log("Vault balance :", vaultBalance / LAMPORTS_PER_SOL, "SOL");
+  console.log("Total LP      :", lpSupply, "LP tokens");
+  console.log("LP price now  :", currentLpPriceSol, "SOL per LP");
   console.log("Lock period   :", Number(vaultState.lockPeriod) / 86400, "days");
   console.log("Min deposit   :", minDepositSol, "SOL");
-  if (isFirstDeposit) {
-    console.log("Status        : 🆕 First deposit — account will be created automatically");
-  } else {
-    console.log("Status        : ✅ Returning depositor");
-  }
+  console.log("Admin fee     :", feePercent, "% (taken from yield, not from deposits)");
+  console.log("───────────────────────────────────────────");
+  console.log("YOUR INFO:");
+  console.log("Your wallet   :", userKeypair.publicKey.toString());
+  console.log("Your SOL bal  :", solBalance / LAMPORTS_PER_SOL, "SOL");
+  console.log("Status        :", isFirstDeposit ? "🆕 First deposit — account created automatically" : "✅ Returning depositor");
   console.log("───────────────────────────────────────────");
 
-  // Ask deposit amount
   const amountInput = await askQuestion(`Enter amount to deposit in SOL (min ${minDepositSol}, multiples only): `);
   const solAmount = parseFloat(amountInput);
 
@@ -121,17 +126,23 @@ async function main() {
 
   if (solBalance < lamports) {
     console.log("❌ Not enough SOL in your wallet!");
-    console.log("   Your balance:", solBalance / LAMPORTS_PER_SOL, "SOL");
     rl.close(); return;
   }
 
+  // Calculate LP to receive using elastic formula
+  const lpToReceive = lpSupply === 0 || vaultBalance === 0
+    ? lamports / minDepositLamports
+    : Math.floor((lamports * lpSupply) / vaultBalance);
+
   const unlockDate = new Date(Date.now() + Number(vaultState.lockPeriod) * 1000);
-  const lpToReceive = lamports / minDepositLamports;
 
   console.log("───────────────────────────────────────────");
+  console.log("DEPOSIT SUMMARY:");
   console.log("Deposit amount :", solAmount, "SOL");
   console.log("LP to receive  :", lpToReceive, "LP tokens");
+  console.log("LP price       :", currentLpPriceSol, "SOL per LP");
   console.log("Unlock time    :", unlockDate.toLocaleString());
+  console.log("Admin fee      :", feePercent, "% applies to yield only — NOT to your deposit");
   console.log("───────────────────────────────────────────");
 
   const confirm = await askQuestion("Confirm deposit? (yes/no): ");
@@ -140,7 +151,6 @@ async function main() {
     rl.close(); return;
   }
 
-  // Get or create LP token account
   const tokenAccount = await getOrCreateAssociatedTokenAccount(
     connection, userKeypair, lpMintPDA, userKeypair.publicKey
   );
@@ -169,10 +179,12 @@ async function main() {
   console.log("───────────────────────────────────────────");
   console.log("Deposited     :", solAmount, "SOL");
   console.log("LP received   :", lpToReceive, "LP tokens");
+  console.log("LP price      :", currentLpPriceSol, "SOL per LP");
   console.log("Vault before  :", vaultBefore / LAMPORTS_PER_SOL, "SOL");
   console.log("Vault after   :", vaultAfter / LAMPORTS_PER_SOL, "SOL");
   console.log("Your LP total :", lpBalance.value.uiAmount, "LP");
   console.log("Unlock time   :", new Date(depState.unlockTime.toNumber() * 1000).toLocaleString());
+  console.log("Admin fee     :", feePercent, "% applies to yield only");
   console.log("───────────────────────────────────────────");
   console.log("TX      :", tx);
   console.log("Explorer: https://explorer.solana.com/tx/" + tx + "?cluster=devnet");

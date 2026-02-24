@@ -10,11 +10,11 @@ async function main() {
   const owner = provider.wallet.publicKey;
 
   const [vaultStatePDA] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault4"), owner.toBuffer()],
+    [Buffer.from("vault5"), owner.toBuffer()],
     program.programId
   );
   const [lpMintPDA] = PublicKey.findProgramAddressSync(
-    [Buffer.from("lp_mint4"), owner.toBuffer()],
+    [Buffer.from("lp_mint5"), owner.toBuffer()],
     program.programId
   );
 

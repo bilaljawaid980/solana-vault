@@ -101,7 +101,7 @@ pub mod vault {
         depositor_state.locked_amount += amount;
         depositor_state.lp_amount += lp_to_mint;
 
-        let seeds = &[b"lp_mint4", vault_owner.as_ref(), &[lp_mint_bump]];
+        let seeds = &[b"lp_mint5", vault_owner.as_ref(), &[lp_mint_bump]];
         let signer_seeds = &[&seeds[..]];
 
         let mint_ctx = CpiContext::new_with_signer(
@@ -148,7 +148,7 @@ pub mod vault {
 
         let vault_owner = ctx.accounts.vault_state.owner;
         let lp_mint_bump = ctx.accounts.vault_state.lp_mint_bump;
-        let seeds = &[b"lp_mint4", vault_owner.as_ref(), &[lp_mint_bump]];
+        let seeds = &[b"lp_mint5", vault_owner.as_ref(), &[lp_mint_bump]];
         let signer_seeds = &[&seeds[..]];
 
         let burn_ctx = CpiContext::new_with_signer(
@@ -290,7 +290,7 @@ pub struct Register<'info> {
         init,
         payer = user,
         space = VaultState::SIZE,
-        seeds = [b"vault4", user.key().as_ref()],
+        seeds = [b"vault5", user.key().as_ref()],
         bump
     )]
     pub vault_state: Account<'info, VaultState>,
@@ -299,7 +299,7 @@ pub struct Register<'info> {
         payer = user,
         mint::decimals = 0,
         mint::authority = lp_mint,
-        seeds = [b"lp_mint4", user.key().as_ref()],
+        seeds = [b"lp_mint5", user.key().as_ref()],
         bump
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -314,7 +314,7 @@ pub struct Deposit<'info> {
     pub user: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"vault4", user.key().as_ref()],
+        seeds = [b"vault5", user.key().as_ref()],
         bump = vault_state.bump,
         constraint = vault_state.owner == user.key() @ VaultError::UnauthorizedUser
     )]
@@ -330,19 +330,19 @@ pub struct DepositByDepositor<'info> {
         init_if_needed,
         payer = depositor,
         space = DepositorState::SIZE,
-        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        seeds = [b"depositor5", depositor.key().as_ref(), vault_state.owner.as_ref()],
         bump
     )]
     pub depositor_state: Account<'info, DepositorState>,
     #[account(
         mut,
-        seeds = [b"vault4", vault_state.owner.as_ref()],
+        seeds = [b"vault5", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
         mut,
-        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint5", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -358,7 +358,7 @@ pub struct Withdraw<'info> {
     pub depositor: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"depositor4", depositor.key().as_ref(), vault_state.owner.as_ref()],
+        seeds = [b"depositor5", depositor.key().as_ref(), vault_state.owner.as_ref()],
         bump = depositor_state.bump,
         constraint = depositor_state.depositor == depositor.key() @ VaultError::UnauthorizedUser,
         constraint = depositor_state.vault_owner == vault_state.owner @ VaultError::WrongVault,
@@ -366,13 +366,13 @@ pub struct Withdraw<'info> {
     pub depositor_state: Account<'info, DepositorState>,
     #[account(
         mut,
-        seeds = [b"vault4", vault_state.owner.as_ref()],
+        seeds = [b"vault5", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
         mut,
-        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint5", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -391,12 +391,12 @@ pub struct AddYield<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"vault4", owner.key().as_ref()],
+        seeds = [b"vault5", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
-        seeds = [b"lp_mint4", owner.key().as_ref()],
+        seeds = [b"lp_mint5", owner.key().as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -406,12 +406,12 @@ pub struct AddYield<'info> {
 #[derive(Accounts)]
 pub struct GetLpValue<'info> {
     #[account(
-        seeds = [b"vault4", vault_state.owner.as_ref()],
+        seeds = [b"vault5", vault_state.owner.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
-        seeds = [b"lp_mint4", vault_state.owner.as_ref()],
+        seeds = [b"lp_mint5", vault_state.owner.as_ref()],
         bump = vault_state.lp_mint_bump,
     )]
     pub lp_mint: Account<'info, Mint>,
@@ -426,7 +426,7 @@ pub struct AdminTransfer<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"vault4", owner.key().as_ref()],
+        seeds = [b"vault5", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
@@ -445,7 +445,7 @@ pub struct UpdateSettings<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"vault4", owner.key().as_ref()],
+        seeds = [b"vault5", owner.key().as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Account<'info, VaultState>,
